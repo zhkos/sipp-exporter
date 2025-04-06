@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
-import csv
-import time
 import os
 import re
+import csv
 import argparse
 from functools import partial
 from collections import namedtuple, deque
@@ -40,20 +39,20 @@ class StatsReader(threading.Thread):
 
     def run(self):
         for row in self:
+            if not row:
+                continue
+
             metrics = list(zip(self.headers, row))
             _, _, ts = metrics[2][1].split("\t")
             ts = int(float(ts))
+
             for name, value in metrics[3:]:
-                self.metrics.append(Metric(name, value, ts))
+                if value:
+                    self.metrics.append(Metric(name, value, ts))
 
     def join(self, timeout = None):
         self.off.set()
         return super().join(timeout)
-
-# get env vars
-file_path = os.getenv('SIPP_TRACE_STAT', '/var/log/sipp/sipp_trace_stat.log')
-server_address = os.getenv('SIPP_EXPORTER_ADDR', '127.0.0.1')
-server_port = int(os.getenv('SIPP_EXPORTER_PORT', 8436))
 
 
 class RequestHandler(BaseHTTPRequestHandler):
