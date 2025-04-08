@@ -11,8 +11,7 @@ import threading
 
 
 Metric = namedtuple("Metric", ["name", "value", "timestamp"])
-METRICS_Q = deque(maxlen=1000)
-HEADERS = None
+MetricMetadata = namedtuple("MetricMetadata", ["prom_type", "factory"])
 
 
 def header_name_to_metric(header: str) -> str:
@@ -24,6 +23,10 @@ def header_name_to_metric(header: str) -> str:
 
 
 class StatsReader(threading.Thread):
+
+    __METADATA = {}
+    METRICS_INFO = b""
+
     def __init__(self, fp, *args, **kwargs):
         self.fp = fp
         self.reader = csv.reader(fp, delimiter=';')
@@ -47,8 +50,37 @@ class StatsReader(threading.Thread):
             ts = int(float(ts))
 
             for name, value in metrics[3:]:
-                if value:
-                    self.metrics.append(Metric(name, value, ts))
+                if not value:
+                    continue
+
+                if name not in self.__METADATA:
+                    # Deduct metric type
+                    if name.endswith("_p"):
+                        prom_type = "gauge"
+                    else:
+                        prom_type = "counter"
+
+                    # Deduct metric format
+                    if not value.isnumeric():
+                        if re.match(r"\d+:\d+:\d+:\d+", value):
+                            def convert_microseconds_timer(time_str):
+                                hours, minutes, seconds, microseconds = map(int, time_str.split(':'))
+                                return (hours * 3600 + minutes * 60 + seconds) * 1000 + microseconds // 1000
+                            factory = convert_microseconds_timer
+                        elif re.match(r"\d+:\d+:\d+", value):
+                            def convert_seconds_timer(time_str):
+                                hours, minutes, seconds = map(int, time_str.split(':'))
+                                return (hours * 3600 + minutes * 60 + seconds) * 1000
+                            factory = convert_seconds_timer
+                        else:
+                            continue
+                    else:
+                        factory = lambda x: x
+
+                    StatsReader.__METADATA[name] = MetricMetadata(prom_type, factory)
+                    StatsReader.METRICS_INFO += f"# TYPE {name} {prom_type}\n".encode()
+
+                self.metrics.append(Metric(name, self.__METADATA[name].factory(value), ts))
 
     def join(self, timeout = None):
         self.off.set()
@@ -66,13 +98,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            # form http response
+
+            self.wfile.write(StatsReader.METRICS_INFO)
+
             while True:
                 try:
                     name, value, ts = self.metrics.pop()
                     self.wfile.write(f"{name} {value} {ts}\n".encode())
                 except IndexError:
                     break
+
         else:
             self.send_response(404)
             self.end_headers()
