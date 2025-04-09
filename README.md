@@ -8,6 +8,7 @@ Key features:
 - 🚀 Runs alongside SIPp or processes existing stat files
 - ⏱️ Converts SIPp's timing metrics to milliseconds
 - 📈 Exposes metrics in Prometheus format
+- 🏷️ Labeling metrics with stat filename
 - 🔄 Handles both periodic (P) and cumulative (C) metrics
 - 🌐 Simple web server for metric collection
 
