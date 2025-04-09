@@ -3,9 +3,12 @@
 import os
 import re
 import csv
+import glob
 import time
 import logging
+import tempfile
 import argparse
+import subprocess
 from functools import partial
 from collections import namedtuple, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -137,9 +140,33 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def prepare_sipp_cmd(sipp_cmd: list):
+    if len(sipp_cmd) < 2 or sipp_cmd[0] != '--' or sipp_cmd[1] != 'sipp':
+        logger.error("Incorrect SIPp command")
+        exit(1)
+
+    sipp_cmd = sipp_cmd[1:]
+
+    if "-trace_stat" not in sipp_cmd:
+        logger.debug("-trace_stat was not provided for SIPp command. Adding automatically")
+        sipp_cmd.insert(1, "-trace_stat")
+
+    if "-stf" not in sipp_cmd:
+        logger.debug("-stf was not provided for SIPp command. Temporary file will be generated")
+        stat_file = tempfile.NamedTemporaryFile(delete_on_close=False, delete=False)
+        stat_file.close()
+        stat_file = stat_file.name
+        sipp_cmd.insert(1, stat_file)
+        sipp_cmd.insert(1, "-stf")
+    else:
+        stat_file = sipp_cmd[sipp_cmd.index("-stf") + 1]
+
+    return sipp_cmd, stat_file
+
+
+
 parser = argparse.ArgumentParser(description='SIPp metrics exporter. In counter names, (P) means Periodic - since last statistic row and (C) means Cumulated - since sipp was started.')
-parser.add_argument('--file', type=str, default=os.getenv("SIPP_TRACE_STAT", '/var/log/sipp/sipp_trace_stat.log'),
-                    help='Path to the CSV file (default: /var/log/sipp/sipp_trace_stat.log) or env SIPP_TRACE_STAT')
+parser.add_argument('--filepath', type=str, help='Filename or wildcard for CSV stats')
 parser.add_argument('--address', type=str, default=os.environ.get("SIPP_EXPORTER_ADDR", "127.0.0.1"),
                     help='Server address (default: 127.0.0.1) or env SIPP_EXPORTER_ADDR')
 parser.add_argument('--port', type=int, default=os.environ.get("SIPP_EXPORTER_PORT", 8436),
@@ -147,14 +174,34 @@ parser.add_argument('--port', type=int, default=os.environ.get("SIPP_EXPORTER_PO
 
 
 if __name__ == '__main__':
-    args = parser.parse_args()
+    readers = []
+    sipp_proc = None
+    args, sipp_cmd = parser.parse_known_args()
 
-    reader = StatsReader(args.file)
-    reader.start()
+    if not args.filepath and not sipp_cmd:
+        logger.error('Provide --filepath argument or SIPp launch command after "--"')
+        exit(1)
 
-    server = HTTPServer((args.address, args.port), partial(RequestHandler, [reader]))
+    if sipp_cmd:
+        sipp_cmd, stat_file = prepare_sipp_cmd(sipp_cmd)
+        sipp_proc = subprocess.Popen(sipp_cmd)
+        time.sleep(1)   # Let SIPp populate stat file first
+        sipp_reader = StatsReader(stat_file)
+
+    if args.filepath:
+        for file in glob.glob(args.filepath):
+            reader = StatsReader(file)
+            readers.append(reader)
+
+    for reader in readers:
+        reader.start()
+
+    server = HTTPServer((args.address, args.port), partial(RequestHandler, readers))
 
     try:
         server.serve_forever()
     finally:
-        reader.join()
+        for reader in readers:
+            reader.join()
+        if sipp_proc:
+            sipp_proc.kill()
