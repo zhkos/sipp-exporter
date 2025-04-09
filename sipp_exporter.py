@@ -3,12 +3,16 @@
 import os
 import re
 import csv
+import time
+import logging
 import argparse
 from functools import partial
 from collections import namedtuple, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
+
+logger = logging.getLogger(__name__)
 
 Metric = namedtuple("Metric", ["name", "value", "timestamp"])
 MetricMetadata = namedtuple("MetricMetadata", ["prom_type", "factory"])
@@ -27,21 +31,59 @@ class StatsReader(threading.Thread):
     __METADATA = {}
     METRICS_INFO = b""
 
-    def __init__(self, fp, *args, **kwargs):
-        self.fp = fp
-        self.reader = csv.reader(fp, delimiter=';')
+    def __init__(self, stat_file):
+        logger.debug(f"Init reader for {stat_file}")
+
+        self.stat_file = open(stat_file, "r")
+        self.reader = csv.reader(self.stat_file, delimiter=';')
         self.headers = [header_name_to_metric(hdr) for hdr in next(iter(self.reader)) if hdr]
         self.metrics = deque(maxlen=1000)
         self.off = threading.Event()
 
-        super().__init__(*args, **kwargs)
+        super().__init__(name=f"{self.__class__.__name__}({stat_file})")
 
     def __iter__(self):
         while not self.off.is_set():
             yield from self.reader
+            time.sleep(0.1)
+
+    def get_or_init_metadata(self, name, value):
+        if name not in self.__METADATA:
+
+            # Deduct metric type
+            if name.endswith("_p"):
+                prom_type = "gauge"
+            else:
+                prom_type = "counter"
+
+            # Deduct metric format
+            if not value.isnumeric():
+                if re.match(r"\d+:\d+:\d+:\d+", value):
+                    def convert_microseconds_timer(time_str):
+                        hours, minutes, seconds, microseconds = map(int, time_str.split(':'))
+                        return (hours * 3600 + minutes * 60 + seconds) * 1000 + microseconds // 1000
+                    factory = convert_microseconds_timer
+                elif re.match(r"\d+:\d+:\d+", value):
+                    def convert_seconds_timer(time_str):
+                        hours, minutes, seconds = map(int, time_str.split(':'))
+                        return (hours * 3600 + minutes * 60 + seconds) * 1000
+                    factory = convert_seconds_timer
+                else:
+                    logger.error(f"Unexpected value for field {name}: '{value}'. Cannot parse as anything")
+                    return None
+            else:
+                factory = lambda x: x
+
+            StatsReader.__METADATA[name] = MetricMetadata(prom_type, factory)
+            StatsReader.METRICS_INFO += f"# TYPE {name} {prom_type}\n".encode()
+
+        return StatsReader.__METADATA[name]
 
     def run(self):
+        logger.debug(f"Start reader for {self.stat_file.name}")
+
         for row in self:
+
             if not row:
                 continue
 
@@ -51,46 +93,27 @@ class StatsReader(threading.Thread):
 
             for name, value in metrics[3:]:
                 if not value:
+                    logger.debug(f"Field '{name}' contains empty value. Skipping...")
                     continue
 
-                if name not in self.__METADATA:
-                    # Deduct metric type
-                    if name.endswith("_p"):
-                        prom_type = "gauge"
-                    else:
-                        prom_type = "counter"
+                meta = self.get_or_init_metadata(name, value)
 
-                    # Deduct metric format
-                    if not value.isnumeric():
-                        if re.match(r"\d+:\d+:\d+:\d+", value):
-                            def convert_microseconds_timer(time_str):
-                                hours, minutes, seconds, microseconds = map(int, time_str.split(':'))
-                                return (hours * 3600 + minutes * 60 + seconds) * 1000 + microseconds // 1000
-                            factory = convert_microseconds_timer
-                        elif re.match(r"\d+:\d+:\d+", value):
-                            def convert_seconds_timer(time_str):
-                                hours, minutes, seconds = map(int, time_str.split(':'))
-                                return (hours * 3600 + minutes * 60 + seconds) * 1000
-                            factory = convert_seconds_timer
-                        else:
-                            continue
-                    else:
-                        factory = lambda x: x
+                if not meta:
+                    logger.warning(f"No metadata for field '{name}' found. Skipping...")
+                    continue
 
-                    StatsReader.__METADATA[name] = MetricMetadata(prom_type, factory)
-                    StatsReader.METRICS_INFO += f"# TYPE {name} {prom_type}\n".encode()
-
-                self.metrics.append(Metric(name, self.__METADATA[name].factory(value), ts))
+                self.metrics.append(Metric(name, meta.factory(value), ts))
 
     def join(self, timeout = None):
         self.off.set()
-        return super().join(timeout)
+        super().join(timeout)
+        self.stat_file.close()
 
 
 class RequestHandler(BaseHTTPRequestHandler):
 
-    def __init__(self, metrics, *args, **kwargs):
-        self.metrics = metrics
+    def __init__(self, readers, *args, **kwargs):
+        self.readers = readers
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
@@ -101,12 +124,13 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             self.wfile.write(StatsReader.METRICS_INFO)
 
-            while True:
-                try:
-                    name, value, ts = self.metrics.pop()
-                    self.wfile.write(f"{name} {value} {ts}\n".encode())
-                except IndexError:
-                    break
+            for reader in self.readers:
+                while True:
+                    try:
+                        name, value, ts = reader.metrics.pop()
+                        self.wfile.write(f"{name} {value} {ts}\n".encode())
+                    except IndexError:
+                        break
 
         else:
             self.send_response(404)
@@ -125,10 +149,10 @@ parser.add_argument('--port', type=int, default=os.environ.get("SIPP_EXPORTER_PO
 if __name__ == '__main__':
     args = parser.parse_args()
 
-    reader = StatsReader(open(args.file, "r"))
+    reader = StatsReader(args.file)
     reader.start()
 
-    server = HTTPServer((args.address, args.port), partial(RequestHandler, reader.metrics))
+    server = HTTPServer((args.address, args.port), partial(RequestHandler, [reader]))
 
     try:
         server.serve_forever()
