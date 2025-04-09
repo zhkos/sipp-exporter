@@ -38,7 +38,7 @@ class StatsReader(threading.Thread):
     __METADATA = {}
     METRICS_INFO = b""
 
-    def __init__(self, stat_file):
+    def __init__(self, stat_file, labels = None):
         logger.debug(f"Init reader for {stat_file}")
 
         self.stat_file = open(stat_file, "r")
@@ -46,6 +46,8 @@ class StatsReader(threading.Thread):
         self.headers = [header_name_to_metric(hdr) for hdr in next(iter(self.reader)) if hdr]
         self.metrics = deque(maxlen=1000)
         self.off = threading.Event()
+        self.labels = {"filename": stat_file}
+        self.labels.update(labels or {})
 
         super().__init__(name=f"{self.__class__.__name__}({stat_file})")
 
@@ -133,9 +135,10 @@ class RequestHandler(BaseHTTPRequestHandler):
 
             for reader in self.readers:
                 while True:
+                    label_str = ",".join([f'{key}="{value}"' for key, value in reader.labels.items()])
                     try:
                         name, value, ts = reader.metrics.pop()
-                        self.wfile.write(f"{name} {value} {ts}\n".encode())
+                        self.wfile.write(f"{name}{{{label_str}}} {value} {ts}\n".encode())
                     except IndexError:
                         break
 
@@ -145,11 +148,15 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def prepare_sipp_cmd(sipp_cmd: list):
-    if len(sipp_cmd) < 2 or sipp_cmd[0] != '--' or sipp_cmd[1] != 'sipp':
-        logger.error("Incorrect SIPp command")
-        exit(1)
+    assert sipp_cmd
 
-    sipp_cmd = sipp_cmd[1:]
+    sipp_cmd = sipp_cmd[1:] if sipp_cmd[0] == "--" else sipp_cmd
+
+    scenario_name = "uac"
+    if sipp_cmd.index("-sn"):
+        scenario_name = sipp_cmd[sipp_cmd.index("-sn") + 1]
+    elif sipp_cmd.index("-sf"):
+        scenario_name = sipp_cmd[sipp_cmd.index("-sf") + 1].removesuffix(".xml")
 
     if "-trace_stat" not in sipp_cmd:
         logger.debug("-trace_stat was not provided for SIPp command. Adding automatically")
@@ -157,7 +164,7 @@ def prepare_sipp_cmd(sipp_cmd: list):
 
     if "-stf" not in sipp_cmd:
         logger.debug("-stf was not provided for SIPp command. Temporary file will be generated")
-        stat_file = tempfile.NamedTemporaryFile(delete_on_close=False, delete=False)
+        stat_file = tempfile.NamedTemporaryFile(delete_on_close=False, delete=False, prefix=f"{scenario_name}_")
         stat_file.close()
         stat_file = stat_file.name
         sipp_cmd.insert(1, stat_file)
@@ -180,8 +187,6 @@ parser.add_argument('--port', type=int, default=os.environ.get("SIPP_EXPORTER_PO
 if __name__ == '__main__':
 
     def cleanup():
-        for reader in READERS:
-            reader.join()
         if SIPP_PROC:
             SIPP_PROC.kill()
     atexit.register(cleanup)
@@ -207,4 +212,11 @@ if __name__ == '__main__':
     for reader in READERS:
         reader.start()
 
-    HTTPServer((args.address, args.port), partial(RequestHandler, READERS)).serve_forever()
+    try:
+        server = HTTPServer((args.address, args.port), partial(RequestHandler, READERS))
+        server.serve_forever()
+    except Exception as e:
+        logger.error(e)
+    finally:
+        for reader in READERS:
+            reader.join()
