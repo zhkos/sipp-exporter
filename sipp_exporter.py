@@ -5,6 +5,7 @@ import re
 import csv
 import glob
 import time
+import atexit
 import logging
 import tempfile
 import argparse
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 Metric = namedtuple("Metric", ["name", "value", "timestamp"])
 MetricMetadata = namedtuple("MetricMetadata", ["prom_type", "factory"])
+
+READERS = []
+SIPP_PROC = None
 
 
 def header_name_to_metric(header: str) -> str:
@@ -174,8 +178,14 @@ parser.add_argument('--port', type=int, default=os.environ.get("SIPP_EXPORTER_PO
 
 
 if __name__ == '__main__':
-    readers = []
-    sipp_proc = None
+
+    def cleanup():
+        for reader in READERS:
+            reader.join()
+        if SIPP_PROC:
+            SIPP_PROC.kill()
+    atexit.register(cleanup)
+
     args, sipp_cmd = parser.parse_known_args()
 
     if not args.filepath and not sipp_cmd:
@@ -184,24 +194,17 @@ if __name__ == '__main__':
 
     if sipp_cmd:
         sipp_cmd, stat_file = prepare_sipp_cmd(sipp_cmd)
-        sipp_proc = subprocess.Popen(sipp_cmd)
+        SIPP_PROC = subprocess.Popen(sipp_cmd)
         time.sleep(1)   # Let SIPp populate stat file first
         sipp_reader = StatsReader(stat_file)
+        READERS.append(sipp_reader)
 
     if args.filepath:
         for file in glob.glob(args.filepath):
             reader = StatsReader(file)
-            readers.append(reader)
+            READERS.append(reader)
 
-    for reader in readers:
+    for reader in READERS:
         reader.start()
 
-    server = HTTPServer((args.address, args.port), partial(RequestHandler, readers))
-
-    try:
-        server.serve_forever()
-    finally:
-        for reader in readers:
-            reader.join()
-        if sipp_proc:
-            sipp_proc.kill()
+    HTTPServer((args.address, args.port), partial(RequestHandler, READERS)).serve_forever()
