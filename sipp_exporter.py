@@ -98,7 +98,7 @@ class StatsReader(threading.Thread):
 
             metrics = list(zip(self.headers, row))
             _, _, ts = metrics[2][1].split("\t")
-            ts = int(float(ts))
+            ts = int(float(ts) * 1000)
 
             for name, value in metrics[3:]:
                 if not value:
@@ -152,11 +152,13 @@ def prepare_sipp_cmd(sipp_cmd: list):
 
     sipp_cmd = sipp_cmd[1:] if sipp_cmd[0] == "--" else sipp_cmd
 
-    scenario_name = "uac"
-    if sipp_cmd.index("-sn"):
+    if "-sn" in sipp_cmd:
         scenario_name = sipp_cmd[sipp_cmd.index("-sn") + 1]
-    elif sipp_cmd.index("-sf"):
-        scenario_name = sipp_cmd[sipp_cmd.index("-sf") + 1].removesuffix(".xml")
+    elif "-sf" in sipp_cmd:
+        scenario_name = os.path.basename(sipp_cmd[sipp_cmd.index("-sf") + 1].removesuffix(".xml"))
+        print(scenario_name)
+    else:
+        raise Exception("No `-sf` or `-sn` keys found in sipp command")
 
     if "-trace_stat" not in sipp_cmd:
         logger.debug("-trace_stat was not provided for SIPp command. Adding automatically")
@@ -165,6 +167,7 @@ def prepare_sipp_cmd(sipp_cmd: list):
     if "-stf" not in sipp_cmd:
         logger.debug("-stf was not provided for SIPp command. Temporary file will be generated")
         stat_file = tempfile.NamedTemporaryFile(delete_on_close=False, delete=False, prefix=f"{scenario_name}_")
+        print(stat_file.name)
         stat_file.close()
         stat_file = stat_file.name
         sipp_cmd.insert(1, stat_file)
