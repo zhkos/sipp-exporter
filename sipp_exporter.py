@@ -15,7 +15,7 @@ from collections import namedtuple, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
-
+logging.disable(logging.CRITICAL)
 logger = logging.getLogger(__name__)
 
 Metric = namedtuple("Metric", ["name", "value", "timestamp"])
@@ -156,7 +156,6 @@ def prepare_sipp_cmd(sipp_cmd: list):
         scenario_name = sipp_cmd[sipp_cmd.index("-sn") + 1]
     elif "-sf" in sipp_cmd:
         scenario_name = os.path.basename(sipp_cmd[sipp_cmd.index("-sf") + 1].removesuffix(".xml"))
-        print(scenario_name)
     else:
         raise Exception("No `-sf` or `-sn` keys found in sipp command")
 
@@ -167,7 +166,6 @@ def prepare_sipp_cmd(sipp_cmd: list):
     if "-stf" not in sipp_cmd:
         logger.debug("-stf was not provided for SIPp command. Temporary file will be generated")
         stat_file = tempfile.NamedTemporaryFile(delete_on_close=False, delete=False, prefix=f"{scenario_name}_")
-        print(stat_file.name)
         stat_file.close()
         stat_file = stat_file.name
         sipp_cmd.insert(1, stat_file)
